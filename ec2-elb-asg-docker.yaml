@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: 2010-09-09
+Metadata:
+    Generator: "Claudio Cordova"
+Description: The template used to create an ECS Cluster from the ECS Console.
+Parameters:
+  ECSClusterName:
+    Type: String
+    Description: >-
+      Specifies the ECS Cluster Name with which the resources would be
+      associated
+    Default: ecs-ec2-cluster
+
+
+Resources:
+  LaunchConfiguration:
+    Type: "AWS::AutoScaling::LaunchConfiguration"
+    Properties:
+      LaunchConfigurationName: "ec2-elb-InstanceLc"
+      AssociatePublicIpAddress: true     
+      ImageId: "ami-04581fbf744a7d11f" 
+      InstanceType: "t2.micro"
+      InstanceMonitoring: true
+      EbsOptimized: false     
+      IamInstanceProfile: !Sub "arn:aws:iam::${AWS::AccountId}:instance-profile/EC2RoleForCodeDeploy"              
+      KeyName: "DemoKeyPair"
+      SecurityGroups: 
+        - !Ref EC2SecurityGroup       
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          # Install Docker
+          sudo yum update -y
+          sudo yum install docker -y
+          sudo service docker start
+          sudo usermod -a -G docker ec2-user
+          sudo chmod 666 /var/run/docker.sock
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 361494667617.dkr.ecr.us-east-1.amazonaws.com/poker-analyzer-service-repository
+          docker pull 361494667617.dkr.ecr.us-east-1.amazonaws.com/poker-analyzer-service-repository:0.0.1-SNAPSHOT
+          docker run -p 8080:8080 361494667617.dkr.ecr.us-east-1.amazonaws.com/poker-analyzer-service-repository:0.0.1-SNAPSHOT > /home/ec2-user/app.log
+
+
+
+
+
+
+
+  EC2SecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "ec2-elb-ec2-sg"
+      GroupName: "ec2-elb-ec2-sg"
+      VpcId: !ImportValue DeploymentVpcId 
+      SecurityGroupIngress: 
+        - 
+          CidrIp: "0.0.0.0/0"
+          FromPort: 80
+          IpProtocol: "tcp"
+          ToPort: 80
+        - 
+          CidrIp: "0.0.0.0/0"
+          FromPort: 8080
+          IpProtocol: "tcp"
+          ToPort: 8080
+        - 
+          CidrIp: "0.0.0.0/0"
+          FromPort: 22
+          IpProtocol: "tcp"
+          ToPort: 22          
+      SecurityGroupEgress: 
+        - 
+          CidrIp: "0.0.0.0/0"
+          IpProtocol: "-1"
+
+
+
+
+
+  AutoScalingGroup:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      AutoScalingGroupName: "ec2-elb-asg"
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      MinSize: 2
+      MaxSize: 2
+      DesiredCapacity: 2
+      HealthCheckGracePeriod: 300
+      AvailabilityZones:
+        - "us-east-1a"
+        - "us-east-1b"
+      VPCZoneIdentifier: !Split [",", !ImportValue DeploymentSubnetIds]
+      TargetGroupARNs:
+        - !Ref TargetGroup
+
+
+
+
+  LoadBalancer:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    DependsOn: ELBSecurityGroup
+    Properties:
+      Name: "ec2-elb-elb"
+      Scheme: "internet-facing"
+      IpAddressType: "ipv4"      
+      SecurityGroups:
+        - !Ref ELBSecurityGroup
+      Subnets: !Split [",", !ImportValue DeploymentSubnetIds]
+
+
+  ELBSecurityGroup:
+      Type: "AWS::EC2::SecurityGroup"
+      Properties: 
+          GroupDescription: "ec2-elb-elb-sg"
+          GroupName: "ec2-elb-elb-sg"
+          VpcId: !ImportValue DeploymentVpcId
+          SecurityGroupIngress: 
+            - 
+              CidrIp: "0.0.0.0/0"
+              IpProtocol: "-1"
+          SecurityGroupEgress: 
+            - 
+              CidrIp: "0.0.0.0/0"
+              IpProtocol: "-1"
+
+
+
+
+  TargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    DependsOn: LoadBalancer
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: "/health"
+      Port: 8080
+      Protocol: "HTTP"
+      HealthCheckPort: "8080"
+      HealthCheckProtocol: "HTTP"
+      HealthCheckTimeoutSeconds: 5
+      UnhealthyThresholdCount: 2
+      TargetType: "instance"
+      Matcher: 
+          HttpCode: "200"
+      HealthyThresholdCount: 5
+      VpcId: !ImportValue DeploymentVpcId
+      Name: "ec2-elb-tg"
+      HealthCheckEnabled: true
+
+
+
+
+
+
+
+
+
+
+
+  Listener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: "HTTP"
+      Port: 80
+      DefaultActions:
+        - Type: "forward"
+          TargetGroupArn: !Ref TargetGroup
+
+
+
